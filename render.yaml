@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: iam-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: WEBAPP_URL
+        value: https://petrovskiicreator.github.io/iam-app/
