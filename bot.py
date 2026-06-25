@@ -29,11 +29,26 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def open_app_kb(text="Открыть IAM ✨"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, web_app=WebAppInfo(url=WEBAPP_URL))]])
 
+FREQ_LABELS = {
+    "off":      "🔕 Только важные",
+    "standard": "🌅 Стандарт (утро + вечер)",
+    "3h":       "⏰ Каждые 3 часа",
+    "1h":       "🔔 Каждый час",
+}
+
+def freq_kb(current="standard"):
+    rows = []
+    for key, label in FREQ_LABELS.items():
+        text = ("✅ " if key == current else "") + label
+        rows.append([InlineKeyboardButton(text=text, callback_data=f"freq_{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть IAM", web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="stats"), InlineKeyboardButton(text="🔥 Стрик", callback_data="streak")],
         [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="refer")],
+        [InlineKeyboardButton(text="⚙️ Частота уведомлений", callback_data="settings")],
     ])
 
 def upsert_user(user_id, username, first_name, ref_by=None):
@@ -43,7 +58,7 @@ def upsert_user(user_id, username, first_name, ref_by=None):
     sb.table("bot_users").upsert(data, on_conflict="user_id").execute()
 
 def get_all_users_with_notifications():
-    res = sb.table("bot_users").select("user_id, first_name, tz_offset").eq("notifications", True).execute()
+    res = sb.table("bot_users").select("user_id, first_name, tz_offset, notif_freq").eq("notifications", True).execute()
     return res.data or []
 
 def users_at_local_hour(users: list, target_hour: int) -> list:
@@ -91,7 +106,27 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer("📖 <b>Команды IAM:</b>\n\n/start — главное меню\n/stats — твой прогресс\n/refer — пригласить друга\n/notify on|off — включить/выключить уведомления\n\n❓ Ьужна помощь? Пиши @JAM_support", reply_markup=open_app_kb())
+    await message.answer("📖 <b>Команды IAM:</b>\n\n/start — главное меню\n/stats — твой прогресс\n/refer — пригласить друга\n/settings — частота уведомлений\n/notify on|off — включить/выключить уведомления\n\n❓ Нужна помощь? Пиши @IAM_support", reply_markup=open_app_kb())
+
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
+    uid = message.from_user.id
+    res = sb.table("bot_users").select("notif_freq, notifications").eq("user_id", uid).execute()
+    freq = "standard"
+    if res.data:
+        notif = res.data[0].get("notifications", True)
+        freq = res.data[0].get("notif_freq") or "standard"
+        if not notif:
+            freq = "off"
+    await message.answer(
+        "⚙️ <b>Частота уведомлений</b>\n\n"
+        "🔕 <b>Только важные</b> — стрик, дедлайны, челлендж\n"
+        "🌅 <b>Стандарт</b> — утром (8:00) и вечером (20:00)\n"
+        "⏰ <b>Каждые 3 часа</b> — в 8, 11, 14, 17, 20\n"
+        "🔔 <b>Каждый час</b> — с 8:00 до 22:00",
+        reply_markup=freq_kb(freq),
+        parse_mode=ParseMode.HTML
+    )
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -128,6 +163,37 @@ async def cb_refer(call: CallbackQuery):
     await call.answer()
     await cmd_refer(call.message)
 
+@dp.callback_query(F.data == "settings")
+async def cb_settings(call: CallbackQuery):
+    await call.answer()
+    await cmd_settings(call.message)
+
+@dp.callback_query(F.data.startswith("freq_"))
+async def cb_freq(call: CallbackQuery):
+    await call.answer()
+    freq = call.data.replace("freq_", "")
+    uid = call.from_user.id
+    if freq == "off":
+        sb.table("bot_users").update({"notif_freq": "off"}).eq("user_id", uid).execute()
+        label = "🔕 Мотивационные пуши выключены.\nВажные уведомления (стрик, дедлайны, челлендж) продолжат приходить."
+    else:
+        sb.table("bot_users").update({"notifications": True, "notif_freq": freq}).eq("user_id", uid).execute()
+        label = f"✅ Установлено: {FREQ_LABELS.get(freq, freq)}"
+    try:
+        await call.message.edit_text(
+            "⚙️ <b>Частота уведомлений</b>\n\n"
+            "🔕 <b>Только важные</b> — стрик, дедлайны, челлендж\n"
+            "🌅 <b>Стандарт</b> — утром (8:00) и вечером (20:00)\n"
+            "⏰ <b>Каждые 3 часа</b> — в 8, 11, 14, 17, 20\n"
+            "🔔 <b>Каждый час</b> — с 8:00 до 22:00\n\n"
+            f"<i>{label}</i>",
+            reply_markup=freq_kb(freq),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+
 MORNING_MESSAGES = [
     "☀️ <b>Доброе утро!</b>\n\nНачни день с осознанности.\nПрочитай свои цели и сделай утренний ритуал 🌟",
     "🌅 <b>Новый день — новые возможности!</b>\n\nТвои цели ждут тебя.\nПотрать 5 минут на визуализацию 🎯",
@@ -145,10 +211,10 @@ EVENING_MESSAGES = [
 ]
 
 async def send_morning_push():
-    """Шлём утренний пуш пользователям, у которых сейчас 8:00 по местному времени."""
+    """Шлём утренний пуш в 8:00 пользователям с notif_freq != 'off'."""
     import random
     all_users = get_all_users_with_notifications()
-    users = users_at_local_hour(all_users, 8)
+    users = [u for u in users_at_local_hour(all_users, 8) if (u.get("notif_freq") or "standard") != "off"]
     if not users: return
     text = random.choice(MORNING_MESSAGES)
     count = 0
@@ -159,13 +225,13 @@ async def send_morning_push():
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Morning push failed for {u['user_id']}: {e}")
-    logger.info(f"Morning push sent to {count}/{len(all_users)} users")
+    logger.info(f"Morning push sent to {count} users")
 
 async def send_evening_push():
-    """Шлём вечерний пуш пользователям, у которых сейчас 20:00 по местному времени."""
+    """Шлём вечерний пуш в 20:00 пользователям с notif_freq != 'off'."""
     import random
     all_users = get_all_users_with_notifications()
-    users = users_at_local_hour(all_users, 20)
+    users = [u for u in users_at_local_hour(all_users, 20) if (u.get("notif_freq") or "standard") != "off"]
     if not users: return
     text = random.choice(EVENING_MESSAGES)
     count = 0
@@ -176,7 +242,7 @@ async def send_evening_push():
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Evening push failed for {u['user_id']}: {e}")
-    logger.info(f"Evening push sent to {count}/{len(all_users)} users")
+    logger.info(f"Evening push sent to {count} users")
 
 async def send_streak_warning():
     """Шлём предупреждение пользователям у которых 21:00 по местному И нет чек-ина сегодня."""
@@ -291,6 +357,53 @@ async def send_goal_reminders():
     logger.info(f"Goal reminders sent to {count} users")
 
 
+EXTRA_PUSH_MESSAGES = [
+    "⚡ <b>Момент для практики!</b>\n\nОткрой IAM и сделай одно микродействие — запись, цель или визуализацию 🎯",
+    "🌟 <b>Время напоминания!</b>\n\nКаждое действие приближает тебя к новой версии себя 💫",
+    "🔥 <b>Не теряй импульс!</b>\n\nЗайди в IAM — 2 минуты практики меняют всё ✨",
+    "💡 <b>Мысли создают реальность.</b>\n\nЗапиши свою визуализацию прямо сейчас 🚀",
+    "🎯 <b>Небольшая пауза?</b>\n\nИспользуй её — перечитай цели или напиши благодарность 🙏",
+]
+
+async def send_extra_push():
+    """Доп. пуши для пользователей с freq='3h' (11,14,17) и freq='1h' (9-22 кроме 8 и 20)."""
+    import random
+    utc_hour = datetime.utcnow().hour
+    all_users = get_all_users_with_notifications()
+    if not all_users:
+        return
+
+    count = 0
+    text = random.choice(EXTRA_PUSH_MESSAGES)
+
+    for u in all_users:
+        freq = u.get("notif_freq") or "standard"
+        if freq not in ("3h", "1h"):
+            continue
+        tz = u.get("tz_offset", 3)
+        local_hour = (utc_hour + tz) % 24
+
+        if freq == "3h" and local_hour not in (11, 14, 17):
+            continue
+        if freq == "1h" and local_hour not in range(9, 23):
+            continue
+        if freq == "1h" and local_hour == 20:
+            continue  # вечерний пуш уже отправит send_evening_push
+
+        try:
+            await bot.send_message(
+                u["user_id"], text,
+                reply_markup=open_app_kb("Открыть IAM ✨"),
+                parse_mode=ParseMode.HTML
+            )
+            count += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Extra push failed for {u['user_id']}: {e}")
+
+    logger.info(f"Extra push sent to {count} users (hour={utc_hour} UTC)")
+
+
 async def send_challenge_reminder():
     """19:00 по местному — если пользователь начал челлендж, но сегодня ещё ничего не написал."""
     all_users = get_all_users_with_notifications()
@@ -361,6 +474,7 @@ async def main():
     scheduler.add_job(send_streak_warning,      "cron", minute=0)
     scheduler.add_job(send_evening_push,        "cron", minute=0)
     scheduler.add_job(send_challenge_reminder,  "cron", minute=0)
+    scheduler.add_job(send_extra_push,          "cron", minute=0)
     scheduler.start()
     logger.info("IAM Bot started ✅")
     await dp.start_polling(bot, skip_updates=True)
