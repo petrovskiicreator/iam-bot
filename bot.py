@@ -43,8 +43,19 @@ def upsert_user(user_id, username, first_name, ref_by=None):
     sb.table("bot_users").upsert(data, on_conflict="user_id").execute()
 
 def get_all_users_with_notifications():
-    res = sb.table("bot_users").select("user_id, first_name").eq("notifications", True).execute()
+    res = sb.table("bot_users").select("user_id, first_name, tz_offset").eq("notifications", True).execute()
     return res.data or []
+
+def users_at_local_hour(users: list, target_hour: int) -> list:
+    """Возвращает пользователей, у которых сейчас target_hour по местному времени."""
+    utc_hour = datetime.utcnow().hour
+    result = []
+    for u in users:
+        tz = u.get("tz_offset", 3)
+        local_hour = (utc_hour + tz) % 24
+        if local_hour == target_hour:
+            result.append(u)
+    return result
 
 def add_referral(inviter_id):
     try:
@@ -134,9 +145,11 @@ EVENING_MESSAGES = [
 ]
 
 async def send_morning_push():
-    users = get_all_users_with_notifications()
-    if not users: return
+    """Шлём утренний пуш пользователям, у которых сейчас 8:00 по местному времени."""
     import random
+    all_users = get_all_users_with_notifications()
+    users = users_at_local_hour(all_users, 8)
+    if not users: return
     text = random.choice(MORNING_MESSAGES)
     count = 0
     for u in users:
@@ -146,12 +159,14 @@ async def send_morning_push():
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Morning push failed for {u['user_id']}: {e}")
-    logger.info(f"Morning push sent to {count} users")
+    logger.info(f"Morning push sent to {count}/{len(all_users)} users")
 
 async def send_evening_push():
-    users = get_all_users_with_notifications()
-    if not users: return
+    """Шлём вечерний пуш пользователям, у которых сейчас 20:00 по местному времени."""
     import random
+    all_users = get_all_users_with_notifications()
+    users = users_at_local_hour(all_users, 20)
+    if not users: return
     text = random.choice(EVENING_MESSAGES)
     count = 0
     for u in users:
@@ -161,11 +176,12 @@ async def send_evening_push():
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Evening push failed for {u['user_id']}: {e}")
-    logger.info(f"Evening push sent to {count} users")
+    logger.info(f"Evening push sent to {count}/{len(all_users)} users")
 
 async def send_streak_warning():
-    """Шлём предупреждение только тем, кто НЕ сделал чек-ин сегодня."""
-    users = get_all_users_with_notifications()
+    """Шлём предупреждение пользователям у которых 21:00 по местному И нет чек-ина сегодня."""
+    all_users = get_all_users_with_notifications()
+    users = users_at_local_hour(all_users, 21)
     if not users:
         return
 
@@ -197,11 +213,90 @@ async def send_streak_warning():
 
     logger.info(f"Streak warning: sent={count_sent}, skipped(already checked in)={count_skipped}")
 
+async def send_goal_reminders():
+    """Напоминания о целях с дедлайнами.
+    ≤3 дня  → каждый день
+    4-7 дней → каждые 2 дня (чётные дни года)
+    8-30 дней → раз в неделю (понедельник)
+    >30 дней  → не беспокоим
+    """
+    users = get_all_users_with_notifications()
+    if not users:
+        return
+
+    today = datetime.utcnow().date()
+    count = 0
+
+    for u in users:
+        try:
+            res = sb.table("user_data").select("data").eq("user_id", u["user_id"]).execute()
+            if not res.data:
+                continue
+
+            goals = res.data[0].get("data", {}).get("goals", [])
+            reminders = []
+
+            for g in goals:
+                if g.get("done") or not g.get("deadline"):
+                    continue
+                try:
+                    deadline = datetime.strptime(g["deadline"], "%Y-%m-%d").date()
+                    days_left = (deadline - today).days
+                except Exception:
+                    continue
+
+                if days_left < 0:
+                    continue  # просрочена — не беспокоим
+
+                should_remind = False
+                if days_left <= 3:
+                    should_remind = True                          # каждый день
+                elif days_left <= 7:
+                    should_remind = (today.toordinal() % 2 == 0) # каждые 2 дня
+                elif days_left <= 30:
+                    should_remind = (today.weekday() == 0)        # по понедельникам
+
+                if should_remind:
+                    reminders.append((g, days_left))
+
+            if not reminders:
+                continue
+
+            lines = []
+            for g, dl in reminders[:3]:  # не больше 3 целей в одном сообщении
+                if dl == 0:
+                    tag = "🔴 Сегодня!"
+                elif dl == 1:
+                    tag = "🟠 Завтра"
+                elif dl <= 3:
+                    tag = f"🟡 {dl} дн."
+                else:
+                    tag = f"🟢 {dl} дн."
+                short = g["text"][:60] + ("…" if len(g["text"]) > 60 else "")
+                lines.append(f"{tag} — {short}")
+
+            text = "🎯 <b>Напоминание о целях</b>\n\n" + "\n".join(lines)
+            await bot.send_message(
+                u["user_id"], text,
+                reply_markup=open_app_kb("Открыть цели 🎯"),
+                parse_mode=ParseMode.HTML
+            )
+            count += 1
+            await asyncio.sleep(0.05)
+
+        except Exception as e:
+            logger.warning(f"Goal reminder failed for {u['user_id']}: {e}")
+
+    logger.info(f"Goal reminders sent to {count} users")
+
+
 async def main():
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(send_morning_push,   "cron", hour=6,  minute=0)
-    scheduler.add_job(send_streak_warning, "cron", hour=17, minute=0)
-    scheduler.add_job(send_evening_push,   "cron", hour=18, minute=0)
+    # Запускаем каждый час — внутри каждой функции фильтр по местному времени пользователя
+    scheduler.add_job(send_morning_push,   "cron", minute=0)
+    scheduler.add_job(send_goal_reminders, "cron", hour=10, minute=5)
+    scheduler.add_job(send_streak_warning, "cron", minute=0)
+    scheduler.add_job(send_evening_push,   "cron", minute=0)
     scheduler.start()
     logger.info("IAM Bot started ✅")
     await dp.start_polling(bot, skip_updates=True)
