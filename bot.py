@@ -164,14 +164,38 @@ async def send_evening_push():
     logger.info(f"Evening push sent to {count} users")
 
 async def send_streak_warning():
+    """Шлём предупреждение только тем, кто НЕ сделал чек-ин сегодня."""
     users = get_all_users_with_notifications()
+    if not users:
+        return
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     text = "⚠️ <b>Стрик под угрозой!</b>\n\nТы ещё не сделал чек-ин сегодня.\nОсталось несколько часов — не теряй серию! 🔥"
+
+    count_sent = 0
+    count_skipped = 0
+
     for u in users:
         try:
-            await bot.send_message(u["user_id"], text, reply_markup=open_app_kb("Сделать чек-ин ✓"), parse_mode=ParseMode.HTML)
+            # Проверяем чек-ин за сегодня в user_data
+            res = sb.table("user_data").select("data").eq("user_id", u["user_id"]).execute()
+            if res.data:
+                checkins = res.data[0].get("data", {}).get("checkins", [])
+                if today in checkins:
+                    count_skipped += 1
+                    continue  # уже сделал чек-ин — не беспокоим
+
+            await bot.send_message(
+                u["user_id"], text,
+                reply_markup=open_app_kb("Сделать чек-ин ✓"),
+                parse_mode=ParseMode.HTML
+            )
+            count_sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Streak warning failed for {u['user_id']}: {e}")
+
+    logger.info(f"Streak warning: sent={count_sent}, skipped(already checked in)={count_skipped}")
 
 async def main():
     scheduler = AsyncIOScheduler(timezone="UTC")
