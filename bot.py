@@ -166,9 +166,25 @@ async def cb_refer(call: CallbackQuery):
 @dp.callback_query(F.data == "settings")
 async def cb_settings(call: CallbackQuery):
     await call.answer()
-    await cmd_settings(call.message)
+    uid = call.from_user.id
+    res = sb.table("bot_users").select("notif_freq, notifications").eq("user_id", uid).execute()
+    freq = "standard"
+    if res.data:
+        notif = res.data[0].get("notifications", True)
+        freq = res.data[0].get("notif_freq") or "standard"
+        if not notif:
+            freq = "off"
+    await call.message.answer(
+        "⚙️ <b>Частота уведомлений</b>\n\n"
+        "🔕 <b>Только важные</b> — стрик, дедлайны, челлендж\n"
+        "🌅 <b>Стандарт</b> — утром (8:00) и вечером (20:00)\n"
+        "⏰ <b>Каждые 3 часа</b> — в 8, 11, 14, 17, 20\n"
+        "🔔 <b>Каждый час</b> — с 8:00 до 22:00",
+        reply_markup=freq_kb(freq),
+        parse_mode=ParseMode.HTML
+    )
 
-@dp.callback_query(F.data.startswith("freq_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("freq_"))
 async def cb_freq(call: CallbackQuery):
     await call.answer()
     freq = call.data.replace("freq_", "")
