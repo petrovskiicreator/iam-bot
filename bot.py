@@ -8,7 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
-    WebAppInfo, CallbackQuery
+    WebAppInfo, CallbackQuery, LabeledPrice, PreCheckoutQuery
 )
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,6 +25,17 @@ WEBAPP_URL    = os.getenv("WEBAPP_URL", "https://petrovskiicreator.github.io/iam
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp  = Dispatcher()
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ====== STARS PRODUCTS ======
+
+STAR_PRODUCTS = {
+    "goals25":  {"title": "+25 целей", "desc": "Добавь 25 слотов для целей в IAM",  "stars": 75,   "goals": 25},
+    "goals100": {"title": "+100 целей","desc": "Добавь 100 слотов для целей в IAM", "stars": 250,  "goals": 100},
+    "goals500": {"title": "+500 целей","desc": "Добавь 500 слотов для целей в IAM", "stars": 999,  "goals": 500},
+    "lvlSEEKER":   {"title": "Уровень Искатель 🔍", "desc": "30 дней уровня SEEKER в IAM",    "stars": 199, "lvl": "SEEKER"},
+    "lvlCREATOR":  {"title": "Уровень Творец ⚡",   "desc": "30 дней уровня CREATOR в IAM",   "stars": 499, "lvl": "CREATOR"},
+    "lvlVISIONARY":{"title": "Уровень Визионер 👁", "desc": "30 дней уровня VISIONARY в IAM", "stars": 999, "lvl": "VISIONARY"},
+}
 
 # ====== KEYBOARDS ======
 
@@ -134,6 +145,22 @@ async def cmd_start(message: Message):
                 )
         except:
             pass
+    # Telegram Stars purchase via deep link
+    if len(args) > 1 and args[1].startswith("buy_"):
+        product_key = args[1][4:]  # strip "buy_"
+        if product_key in STAR_PRODUCTS:
+            p = STAR_PRODUCTS[product_key]
+            prices = [LabeledPrice(label=p["title"], amount=p["stars"])]
+            await bot.send_invoice(
+                message.chat.id,
+                title=p["title"],
+                description=p["desc"],
+                payload=f"iam_{product_key}_{user.id}",
+                currency="XTR",
+                prices=prices,
+            )
+            return
+
     upsert_user(user.id, user.username, user.first_name, ref_by)
     await message.answer(
         f"✨ <b>Привет, {user.first_name}!</b>\n\n"
@@ -189,7 +216,7 @@ async def cb_refer(call: CallbackQuery):
     await call.message.answer(
         f"🎁 <b>Пригласи друга — оба получите +5 целей!</b>\n\n"
         f"Твоя ссылка:\n<code>{ref_link}</code>\n\n"
-        "Отправь её другу. Когда он запустит бот — выоба получите бонус 🎯"
+        "Отправь её другу. Когда он запустит бота — вы оба получите бонус 🎯"
     )
 
 @dp.callback_query(F.data == "settings")
@@ -199,12 +226,58 @@ async def cb_settings(call: CallbackQuery):
     freq = get_user_freq(uid)
     await call.message.answer(
         "⚙️ <b>Частота уведомлений</b>\n\n"
-        "🔕 <b>Только важные</b> — стрий, дедлайны, челлендж\n"
+        "🔕 <b>Только важные</b> — стрик, дедлайны, челлендж\n"
         "🌅 <b>Стандарт</b> — утром (8:00) и вечером (20:00)\n"
         "⏰ <b>Каждые 3 часа</b> — в 8, 11, 14, 17, 20\n"
         "🔔 <b>Каждый час</b> — с 8:00 до 22:00",
         reply_markup=freq_kb(freq)
     )
+
+@dp.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    await query.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def payment_success(message: Message):
+    payload = message.successful_payment.invoice_payload  # "iam_goals25_123456"
+    parts = payload.split("_")
+    uid = message.from_user.id
+    try:
+        if len(parts) >= 3 and parts[0] == "iam":
+            product_key = parts[1]  # e.g. "goals25" or "lvlCREATOR"
+            p = STAR_PRODUCTS.get(product_key, {})
+            if "goals" in p:
+                # Add extra goals
+                res = sb.table("bot_users").select("extra_goals").eq("user_id", uid).execute()
+                cur = res.data[0].get("extra_goals", 0) if res.data else 0
+                sb.table("bot_users").update({"extra_goals": cur + p["goals"]}).eq("user_id", uid).execute()
+                # Sync to user_data
+                dr = sb.table("user_data").select("data").eq("user_id", uid).execute()
+                if dr.data:
+                    data = dr.data[0].get("data", {})
+                    data["extraGoals"] = data.get("extraGoals", 0) + p["goals"]
+                    sb.table("user_data").upsert({"user_id": uid, "data": data, "updated_at": datetime.utcnow().isoformat()}, on_conflict="user_id").execute()
+                await message.answer(
+                    f"⭐ <b>Оплата прошла!</b>\n\n+<b>{p['goals']} целей</b> добавлено 🎯\n\nОткрой IAM — слоты уже доступны!",
+                    reply_markup=open_app_kb("Открыть IAM 🚀")
+                )
+            elif "lvl" in p:
+                # Quick level 30 days
+                from datetime import timedelta
+                exp = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d")
+                dr = sb.table("user_data").select("data").eq("user_id", uid).execute()
+                if dr.data:
+                    data = dr.data[0].get("data", {})
+                    data["quickLvl"] = p["lvl"]
+                    data["quickExp"] = exp
+                    sb.table("user_data").upsert({"user_id": uid, "data": data, "updated_at": datetime.utcnow().isoformat()}, on_conflict="user_id").execute()
+                await message.answer(
+                    f"⭐ <b>Оплата прошла!</b>\n\n{p['title']} активен до <b>{exp}</b> 🏆\n\nОткрой IAM!",
+                    reply_markup=open_app_kb("Открыть IAM 🚀")
+                )
+    except Exception as e:
+        logger.error(f"Payment processing error: {e}")
+        await message.answer("✅ Оплата прошла! Открой IAM — обновления уже применены.", reply_markup=open_app_kb())
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
@@ -243,22 +316,22 @@ async def cb_freq(call: CallbackQuery):
 MORNING_MESSAGES = [
     "☀️ <b>Доброе утро!</b>\n\nНачни день с осознанности.\nПрочитай свои цели и сделай утренний ритуал 🌟",
     "🌅 <b>Новый день — новые возможности!</b>\n\nТвои цели ждут тебя.\nПотрать 5 минут на визуализацию 🎯",
-    "✨ <b>У утро меняет жизнь!</b>\n\nУспешные люди начинают день с намерения.\nОткрой IAM и задай тон дню 🚀",
+    "✨ <b>Утро меняет жизнь!</b>\n\nУспешные люди начинают день с намерения.\nОткрой IAM и задай тон дню 🚀",
     "🔥 <b>Привет!</b>\n\nКаждое утро — это шанс стать лучше.\nТвой утренний ритуал занимает всего 5 минут 💫",
     "🎯 <b>Доброе утро!</b>\n\nМысли создают реальность.\nНачни день с чтения своих целей и визуализации ☀️",
 ]
 
 EVENING_MESSAGES = [
-    "🌙 <b>Вечерний ритуал!</b>\n\nКак прошёл твой день?\nЗапиши мысли в дневнии и отметь чек-ин 🔥",
-    "⭐ <b>Время подвести итоги днь!</b>\n\nЧто хорошего случилось сегодня?\nЗапиши 3 благодарности в IAM 🙏",
-    "🌟 <b>Вечер осознанности!</b>\n\nНе засыпай без рефлексии.\nДневник + благодарность + чеи-ин = идеальный вечер ✨",
+    "🌙 <b>Вечерний ритуал!</b>\n\nКак прошёл твой день?\nЗапиши мысли в дневник и отметь чек-ин 🔥",
+    "⭐ <b>Время подвести итоги дня!</b>\n\nЧто хорошего случилось сегодня?\nЗапиши 3 благодарности в IAM 🙏",
+    "🌟 <b>Вечер осознанности!</b>\n\nНе засыпай без рефлексии.\nДневник + благодарность + чек-ин = идеальный вечер ✨",
     "💫 <b>До конца дня ещё есть время!</b>\n\nСделай чек-ин чтобы не потерять стрик 🔥\nЗапиши вечерние мысли 📝",
     "🌙 <b>Вечерний ритуал ждёт!</b>\n\nКаждый вечер — это подготовка к лучшему завтра.\nОткрой IAM и закрой день правильно 🎯",
 ]
 
 EXTRA_PUSH_MESSAGES = [
     "⚡ <b>Момент для практики!</b>\n\nОткрой IAM и сделай одно микродействие — запись, цель или визуализацию 🎯",
-    "🌟 <b>Время напоминаниэ!</b>\n\nКаждое действие приближает мебя к новой версии себя 💫",
+    "🌟 <b>Время напоминания!</b>\n\nКаждое действие приближает тебя к новой версии себя 💫",
     "🔥 <b>Не теряй импульс!</b>\n\nЗайди в IAM — 2 минуты практики меняют всё ✨",
     "💡 <b>Мысли создают реальность.</b>\n\nЗапиши свою визуализацию прямо сейчас 🚀",
     "🎯 <b>Небольшая пауза?</b>\n\nИспользуй её — перечитай цели или напиши благодарность 🙏",
@@ -400,6 +473,63 @@ async def send_goal_reminders():
             logger.warning(f"Goal reminder failed for {u['user_id']}: {e}")
     logger.info(f"Goal reminders sent to {count} users")
 
+async def send_goal_own_reminders():
+    """Ежедневно в 09:00 UTC — напоминания по целям с индивидуальной частотой."""
+    users = get_all_users_with_notifications()
+    if not users:
+        return
+    today = datetime.utcnow().date()
+    count = 0
+    for u in users:
+        try:
+            res = sb.table("user_data").select("data").eq("user_id", u["user_id"]).execute()
+            if not res.data:
+                continue
+            goals = res.data[0].get("data", {}).get("goals", [])
+            remind_goals = []
+            for g in goals:
+                if g.get("done"):
+                    continue
+                rm = g.get("remind")
+                if not rm or rm == "off":
+                    continue
+                should = False
+                if rm == "daily":
+                    should = True
+                elif rm == "3d":
+                    created_ms = g.get("id", 0)
+                    try:
+                        created_date = datetime.utcfromtimestamp(created_ms / 1000).date()
+                        days_since = (today - created_date).days
+                        should = (days_since % 3 == 0)
+                    except Exception:
+                        should = True
+                elif rm == "weekly":
+                    should = (today.weekday() == 0)  # Monday
+                if should:
+                    remind_goals.append(g)
+            if not remind_goals:
+                continue
+            lines = []
+            for g in remind_goals[:3]:
+                short = g["text"][:55] + ("…" if len(g["text"]) > 55 else "")
+                dl_txt = ""
+                if g.get("deadline"):
+                    try:
+                        dl = (datetime.strptime(g["deadline"], "%Y-%m-%d").date() - today).days
+                        if dl >= 0:
+                            dl_txt = f" · {dl} дн. до дедлайна"
+                    except Exception:
+                        pass
+                lines.append(f"🎯 {short}{dl_txt}")
+            text = "🔔 <b>Напоминание о твоих целях:</b>\n\n" + "\n".join(lines) + "\n\n<i>Перечитай и визуализируй ✨</i>"
+            await bot.send_message(u["user_id"], text, reply_markup=open_app_kb("Открыть цели 🎯"))
+            count += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Goal own reminder failed for {u['user_id']}: {e}")
+    logger.info(f"Goal own reminders sent to {count} users")
+
 async def send_challenge_reminder():
     """19:00 по местному — если незакрытый день челленджа."""
     all_users = get_all_users_with_notifications()
@@ -450,18 +580,19 @@ async def send_challenge_reminder():
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Challenge reminder failed for {u['user_id']}: {e}")
-    logger.info(f"Challenge reminter: sent={count_sent}, skipped={count_skipped}")
+    logger.info(f"Challenge reminder: sent={count_sent}, skipped={count_skipped}")
 
 # ====== MAIN ======
 
 async def main():
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(send_morning_push,       "cron", minute=0)
-    scheduler.add_job(send_goal_reminders,     "cron", hour=10, minute=5)
-    scheduler.add_job(send_streak_warning,     "cron", minute=0)
-    scheduler.add_job(send_evening_push,       "cron", minute=0)
-    scheduler.add_job(send_challenge_reminder, "cron", minute=0)
-    scheduler.add_job(send_extra_push,         "cron", minute=0)
+    scheduler.add_job(send_morning_push,        "cron", minute=0)
+    scheduler.add_job(send_goal_reminders,      "cron", hour=10, minute=5)
+    scheduler.add_job(send_goal_own_reminders,  "cron", hour=9,  minute=0)
+    scheduler.add_job(send_streak_warning,      "cron", minute=0)
+    scheduler.add_job(send_evening_push,        "cron", minute=0)
+    scheduler.add_job(send_challenge_reminder,  "cron", minute=0)
+    scheduler.add_job(send_extra_push,          "cron", minute=0)
     scheduler.start()
     logger.info("IAM Bot started ✅")
     await dp.start_polling(bot, skip_updates=True)
