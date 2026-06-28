@@ -671,7 +671,7 @@ async def handle_webapp_data(message: Message):
 # ====== PUSH MESSAGES ======
 
 MORNING_MESSAGES = [
-    "☀️ <b>Доброе утро!</b>\n\nНачни день с осознанности.\nПрочитай свои цели и сделай утренний ритуал 🌟",
+    "☀️ <b>Доброе утро!</b>\n\n<b>Изобилие</b> начинается с осознанности.\nПрочитай свои цели и сделай утренний ритуал 🌟",
     "🌅 <b>Новый день — новые возможности!</b>\n\nТвои цели ждут тебя.\nПотрать 5 минут на визуализацию 🎯",
     "✨ <b>Утро меняет жизнь!</b>\n\nУспешные люди начинают день с намерения.\nОткрой IAM и задай тон дню 🚀",
     "🔥 <b>Привет!</b>\n\nКаждое утро — это шанс стать лучше.\nТвой утренний ритуал занимает всего 5 минут 💫",
@@ -937,8 +937,8 @@ async def send_challenge_reminder():
     count_sent = 0
     count_skipped = 0
     AUTO_COMPLETE_TYPES = {"goals", "stats"}
-    CHA = ["goals","vision","gratitude","diary","vision","diary","diary","goals","vision","diary",
-           "gratitude","vision","diary","goals","gratitude","vision","diary","stats","goals","vision","diary"]
+    CHA = ["goals","vision","gratitude","vision","vision","gratitude","vision","goals","vision","gratitude",
+           "gratitude","vision","vision","goals","gratitude","vision","gratitude","stats","goals","vision","gratitude"]
     for u in users:
         try:
             res = sb.table("user_data").select("data").eq("user_id", u["user_id"]).execute()
@@ -954,7 +954,6 @@ async def send_challenge_reminder():
                 continue
             arr_map = {
                 "vision": data.get("vis") or [],
-                "diary": data.get("diary") or [],
                 "gratitude": data.get("grat") or []
             }
             arr = arr_map.get(day_type, [])
@@ -964,7 +963,6 @@ async def send_challenge_reminder():
             day_num = current_day_idx + 1
             type_label = {
                 "vision": "визуализацию ✨",
-                "diary": "запись в дневнике 📝",
                 "gratitude": "благодарности 🙏"
             }.get(day_type, "задание")
             text = (
