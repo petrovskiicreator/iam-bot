@@ -31,9 +31,10 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ====== STARS PRODUCTS ======
 
 STAR_PRODUCTS = {
-    "goals25":  {"title": "+25 целей", "desc": "Добавь 25 слотов для целей в IAM",  "stars": 75,   "goals": 25},
-    "goals100": {"title": "+100 целей","desc": "Добавь 100 слотов для целей в IAM", "stars": 250,  "goals": 100},
-    "goals500": {"title": "+500 целей","desc": "Добавь 500 слотов для целей в IAM", "stars": 999,  "goals": 500},
+    "goals25":   {"title": "+25 целей",   "desc": "Добавь 25 слотов для целей в IAM",    "stars": 75,   "goals": 25},
+    "goals100":  {"title": "+100 целей",  "desc": "Добавь 100 слотов для целей в IAM",   "stars": 250,  "goals": 100},
+    "goals500":  {"title": "+500 целей",  "desc": "Добавь 500 слотов для целей в IAM",   "stars": 999,  "goals": 500},
+    "goals1000": {"title": "+1000 целей", "desc": "Добавь 1000 слотов для целей в IAM",  "stars": 1999, "goals": 1000},
     "lvlSEEKER":   {"title": "Уровень Искатель 🔍", "desc": "30 дней уровня SEEKER в IAM",    "stars": 199, "lvl": "SEEKER"},
     "lvlCREATOR":  {"title": "Уровень Творец ⚡",   "desc": "30 дней уровня CREATOR в IAM",   "stars": 499, "lvl": "CREATOR"},
     "lvlVISIONARY":{"title": "Уровень Визионер 👁", "desc": "30 дней уровня VISIONARY в IAM", "stars": 999, "lvl": "VISIONARY"},
@@ -448,8 +449,8 @@ async def payment_success(message: Message):
                     data["extraGoals"] = data.get("extraGoals", 0) + p["goals"]
                     sb.table("user_data").upsert({"user_id": uid, "data": data, "updated_at": datetime.utcnow().isoformat()}, on_conflict="user_id").execute()
                 await message.answer(
-                    f"⭐ <b>Оплата прошла!</b>\n\n+<b>{p['goals']} целей</b> добавлено 🎯\n\nОткрой IAM — слоты уже доступны!",
-                    reply_markup=open_app_kb("Открыть IAM 🚀")
+                    f"✅ Куплено +{p['goals']} целей! Открой IAM 🎯",
+                    reply_markup=open_app_kb("Открыть IAM 🎯")
                 )
             elif "lvl" in p:
                 # Quick level 30 days
@@ -628,6 +629,94 @@ async def handle_time_input(message: Message):
         "📅 Выбери частоту:",
         reply_markup=freq_remind_kb()
     )
+
+HELP_TEXT = (
+    "📖 <b>Полное руководство IAM</b>\n\n"
+    "<b>🎯 Цели</b>\n"
+    "Пиши цели в настоящем времени — как будто уже достиг. Не \"хочу машину\", а \"я езжу на BMW X5 2024\". "
+    "Чем детальнее — тем сильнее работает. Указывай сумму, дату, ощущения. "
+    "Прорабатывай все 5 сфер: богатство, здоровье, отношения, рост, свобода. "
+    "У успешных людей 5000+ целей — не ограничивай себя.\n\n"
+    "<b>✨ Визуализация</b>\n"
+    "Закрой глаза. Представь идеальный день через 3 года в деталях. "
+    "Запиши от первого лица в настоящем времени. "
+    "Главное — почувствуй эмоцию как будто это уже происходит.\n\n"
+    "<b>🙏 Благодарность</b>\n"
+    "Одна вещь за которую благодарен прямо сейчас. Даже маленькая. "
+    "Мозг начинает замечать хорошее там где раньше не замечал. "
+    "Это меняет восприятие реальности.\n\n"
+    "<b>🔥 Цепочка дней</b>\n"
+    "Отмечай каждый день в приложении и не прерывай цепочку. "
+    "Чем длиннее — тем глубже привычка. "
+    "Пропустил день — цепочка обнуляется. Есть заморозка — она спасает в крайнем случае.\n\n"
+    "<b>🏆 Уровни</b>\n"
+    "DREAMER → SEEKER → CREATOR → VISIONARY → LEGEND\n"
+    "Чем больше практикуешь — тем выше уровень. "
+    "Каждый уровень открывает больше целей, записей и возможностей.\n\n"
+    "<b>🔥 Челлендж 21 день</b>\n"
+    "Один день — одно задание. Следующий день открывается только завтра. "
+    "Пройди все 21 день — это меняет мышление навсегда.\n\n"
+    "<b>🔔 Напоминания</b>\n"
+    "В приложении нажми 🔔 рядом с любой целью. "
+    "Выбери время (например 09:00) и частоту (ежедневно / каждый час / каждые 2-12 часов). "
+    "Бот пришлёт уведомление в точное время. "
+    "Управляй напоминаниями через /reminders — там можно удалить любое.\n\n"
+    "<b>🔮 Пасхалки</b>\n"
+    "В напоминаниях бота, мудрости дня и заданиях челленджа спрятаны фрагменты секретных фраз. "
+    "Читай внимательно — собери все три фрагмента одной пасхалки, введи полную фразу в приложении "
+    "и получи награду (дополнительные цели или заморозки).\n\n"
+    "<b>🔒 Конфиденциальность</b>\n"
+    "IAM полностью анонимен. Мы не знаем твоё имя, не видим твои цели и записи. "
+    "Все данные хранятся только на твоём устройстве и в зашифрованной базе данных. "
+    "Никто кроме тебя не имеет доступа к твоему контенту.\n\n"
+    "<b>💳 Покупки</b>\n"
+    "/buy — купить пакет целей через Telegram Stars\n"
+    "/reminders — управление напоминаниями\n"
+    "/remind — создать новое напоминание\n\n"
+    "По всем вопросам: @APM_PP"
+)
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(HELP_TEXT, reply_markup=open_app_kb("Открыть IAM ✨"))
+
+@dp.message(Command("buy"))
+async def cmd_buy(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 +25 целей · 75 ⭐",   callback_data="buy_goals25")],
+        [InlineKeyboardButton(text="🎯 +100 целей · 250 ⭐",  callback_data="buy_goals100")],
+        [InlineKeyboardButton(text="🎯 +500 целей · 999 ⭐",  callback_data="buy_goals500")],
+        [InlineKeyboardButton(text="🎯 +1000 целей · 1999 ⭐", callback_data="buy_goals1000")],
+    ])
+    await message.answer(
+        "💳 <b>Пакеты целей</b>\n\n"
+        "Купи дополнительные слоты для целей через Telegram Stars:\n\n"
+        "• +25 целей — 75 ⭐\n"
+        "• +100 целей — 250 ⭐\n"
+        "• +500 целей — 999 ⭐\n"
+        "• +1000 целей — 1999 ⭐\n\n"
+        "Нажми кнопку для покупки 👇",
+        reply_markup=kb
+    )
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))
+async def cb_buy(call: CallbackQuery):
+    product_key = call.data[4:]  # strip "buy_"
+    p = STAR_PRODUCTS.get(product_key)
+    if not p:
+        await call.answer("Неизвестный продукт", show_alert=True)
+        return
+    prices = [LabeledPrice(label=p["title"], amount=p["stars"])]
+    await bot.send_invoice(
+        call.message.chat.id,
+        title=p["title"],
+        description=p["desc"],
+        payload=f"iam_{product_key}_{call.from_user.id}",
+        currency="XTR",
+        prices=prices,
+        provider_token="",
+    )
+    await call.answer()
 
 @dp.message(F.web_app_data)
 async def handle_webapp_data(message: Message):
