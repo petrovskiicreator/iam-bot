@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -85,6 +86,7 @@ remind_state: dict = {}  # uid -> {"step", "goals", "page", "goal_text", "remind
 
 REMIND_FREQ_OPTIONS = [
     ("daily", "📅 Ежедневно"),
+    ("1h",    "⏰ Каждый час"),
     ("2h",    "⏰ Каждые 2 часа"),
     ("4h",    "⏰ Каждые 4 часа"),
     ("6h",    "⏰ Каждые 6 часов"),
@@ -92,6 +94,7 @@ REMIND_FREQ_OPTIONS = [
 ]
 REMIND_FREQ_NAMES = {
     "daily": "ежедневно",
+    "1h":   "каждый час",
     "2h":   "каждые 2ч",
     "4h":   "каждые 4ч",
     "6h":   "каждые 6ч",
@@ -592,6 +595,45 @@ async def handle_time_input(message: Message):
         "📅 Выбери частоту:",
         reply_markup=freq_remind_kb()
     )
+
+@dp.message(F.web_app_data)
+async def handle_webapp_data(message: Message):
+    """Receives data sent via Telegram.WebApp.sendData() from the mini-app."""
+    try:
+        data = json.loads(message.web_app_data.data)
+    except Exception:
+        return
+    uid = message.from_user.id
+    if data.get("action") != "remind":
+        return
+    goal_text  = data.get("goal_text", "").strip()
+    remind_time = data.get("remind_time", "09:00")
+    frequency  = data.get("frequency", "daily")
+    if not goal_text or frequency not in REMIND_FREQ_NAMES:
+        await message.answer("❌ Неверные данные напоминания.")
+        return
+    # Validate HH:MM
+    if not re.match(r"^\d{2}:\d{2}$", remind_time):
+        await message.answer("❌ Неверный формат времени.")
+        return
+    tz_offset = 3
+    try:
+        res = sb.table("bot_users").select("tz_offset").eq("user_id", uid).execute()
+        if res.data:
+            tz_offset = res.data[0].get("tz_offset", 3) or 3
+    except Exception:
+        pass
+    ok = save_reminder(uid, goal_text, remind_time, frequency, tz_offset)
+    freq_label = REMIND_FREQ_NAMES.get(frequency, frequency)
+    if ok:
+        await message.answer(
+            f"✅ <b>Напоминание создано!</b>\n\n"
+            f"🎯 {goal_text[:70]}\n"
+            f"🕐 {remind_time} · {freq_label}\n\n"
+            "<i>Управляй напоминаниями через /reminders</i>"
+        )
+    else:
+        await message.answer("❌ Не удалось сохранить напоминание. Попробуй через /remind")
 
 # ====== PUSH MESSAGES ======
 
