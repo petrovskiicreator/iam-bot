@@ -340,6 +340,39 @@ async def cmd_reminders(message: Message):
     text = "📋 <b>Твои напоминания о целях:</b>\n\n" + "\n\n".join(lines) + "\n\n<i>Нажми 🗑 рядом с напоминанием чтобы удалить</i>"
     await message.answer(text, reply_markup=reminders_list_kb(rems))
 
+@dp.message(Command("remind_save"))
+async def cmd_remind_save(message: Message):
+    uid = message.from_user.id
+    raw = message.text or ""
+    try:
+        json_str = raw[raw.index(" ") + 1:]
+        payload = json.loads(json_str)
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.error(f"remind_save parse error uid={uid}: {e}")
+        await message.answer("❌ Ошибка формата данных.")
+        return
+    goal_text   = payload.get("goal_text", "").strip()
+    remind_time = payload.get("remind_time", "09:00")
+    frequency   = payload.get("frequency", "daily")
+    if not goal_text or frequency not in REMIND_FREQ_NAMES:
+        await message.answer("❌ Неверные данные напоминания.")
+        return
+    if not re.match(r"^\d{2}:\d{2}$", remind_time):
+        await message.answer("❌ Неверный формат времени.")
+        return
+    tz_offset = 3
+    try:
+        res = sb.table("bot_users").select("tz_offset").eq("user_id", uid).execute()
+        if res.data:
+            tz_offset = res.data[0].get("tz_offset", 3) or 3
+    except Exception:
+        pass
+    ok = save_reminder(uid, goal_text, remind_time, frequency, tz_offset)
+    if ok:
+        await message.answer(f"✅ Напоминание создано на {remind_time}")
+    else:
+        await message.answer("❌ Не удалось сохранить. Попробуй /remind")
+
 # ====== CALLBACK HANDLERS ======
 
 @dp.callback_query(F.data == "stats")
