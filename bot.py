@@ -285,6 +285,51 @@ async def cmd_start(message: Message):
                 )
         except:
             pass
+    # Shared goal join via deep link
+    if len(args) > 1 and args[1].startswith("join_"):
+        upsert_user(user.id, user.username, user.first_name)
+        code = args[1][5:].upper()
+        try:
+            g_res = sb.table("shared_goals").select("*").eq("invite_code", code).execute()
+            if not g_res.data:
+                await message.answer("❌ Совместная цель не найдена. Проверь ссылку.")
+                return
+            g = g_res.data[0]
+            m_res = sb.table("shared_members").select("id,status").eq("goal_id", g["id"]).eq("user_id", user.id).execute()
+            if m_res.data:
+                existing = m_res.data[0]
+                if existing["status"] == "active":
+                    await message.answer(
+                        f"👥 Ты уже участник цели <b>{g['title']}</b>!\n\nОткрой IAM, чтобы увидеть её.",
+                        reply_markup=open_app_kb("Открыть IAM ✨")
+                    )
+                else:
+                    sb.table("shared_members").update({"status": "active"}).eq("id", existing["id"]).execute()
+                    await message.answer(
+                        f"✅ Ты вернулся в цель <b>{g['title']}</b>!",
+                        reply_markup=open_app_kb("Открыть IAM ✨")
+                    )
+                return
+            uname = user.username or ""
+            sb.table("shared_members").insert({"goal_id": g["id"], "user_id": user.id, "username": uname, "role": "member", "status": "active"}).execute()
+            sb.table("shared_stats").insert({"goal_id": g["id"], "user_id": user.id, "tasks_created": 0, "tasks_done": 0, "encouragements_sent": 0, "days_active": 0}).execute()
+            await message.answer(
+                f"🎉 <b>Добро пожаловать в совместную цель!</b>\n\n"
+                f"🎯 <b>{g['title']}</b>\n\n"
+                "Открой IAM, чтобы посмотреть задачи и участников 👇",
+                reply_markup=open_app_kb("Открыть IAM ✨")
+            )
+            try:
+                creator_id = g["created_by"]
+                joiner_name = f"@{uname}" if uname else user.first_name or "Кто-то"
+                await bot.send_message(creator_id, f"👥 {joiner_name} присоединился к цели <b>{g['title']}</b>!")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"join shared goal error: {e}")
+            await message.answer("❌ Ошибка при входе в цель. Попробуй ещё раз.")
+        return
+
     # Telegram Stars purchase via deep link
     if len(args) > 1 and args[1].startswith("buy_"):
         param = args[1][4:]  # strip "buy_"
@@ -1097,6 +1142,94 @@ async def send_challenge_reminder():
             logger.warning(f"Challenge reminder failed for {u['user_id']}: {e}")
     logger.info(f"Challenge reminder: sent={count_sent}, skipped={count_skipped}")
 
+# ====== SHARED GOALS NOTIFICATIONS ======
+
+async def send_shared_notifications():
+    """Poll encourage_queue and recent task completions every minute."""
+    # Encourage queue
+    try:
+        q_res = sb.table("encourage_queue").select("*").eq("processed", False).execute()
+        for item in (q_res.data or []):
+            try:
+                sender = item.get("from_username") or "Кто-то"
+                goal = item.get("goal_title") or "цели"
+                await bot.send_message(
+                    item["to_user_id"],
+                    f"💪 <b>{sender}</b> подбадривает тебя по цели <b>{goal}</b>!\n\nТы справишься! 🔥"
+                )
+                sb.table("encourage_queue").update({"processed": True}).eq("id", item["id"]).execute()
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"encourage_queue item {item.get('id')}: {e}")
+    except Exception as e:
+        logger.error(f"send_shared_notifications encourage: {e}")
+
+    # Task completion notifications (tasks completed in last 2 minutes)
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(minutes=2)).isoformat()
+        t_res = sb.table("shared_tasks").select("id,goal_id,user_id,text").eq("done", True).gte("done_at", cutoff).execute()
+        for task in (t_res.data or []):
+            try:
+                # Get doer's username
+                u_res = sb.table("shared_members").select("username").eq("goal_id", task["goal_id"]).eq("user_id", task["user_id"]).execute()
+                doer = ""
+                if u_res.data:
+                    uname = u_res.data[0].get("username")
+                    doer = f"@{uname}" if uname else "Участник"
+                else:
+                    doer = "Участник"
+                # Get all other active members
+                members_res = sb.table("shared_members").select("user_id").eq("goal_id", task["goal_id"]).eq("status", "active").execute()
+                msg = f"✅ <b>{doer}</b> выполнил: {task['text']}"
+                for m in (members_res.data or []):
+                    if m["user_id"] != task["user_id"]:
+                        try:
+                            await bot.send_message(m["user_id"], msg)
+                            await asyncio.sleep(0.05)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning(f"task notification error: {e}")
+    except Exception as e:
+        logger.error(f"send_shared_notifications tasks: {e}")
+
+
+async def send_shared_deadline_reminders():
+    """Daily at 09:00 UTC: warn members of goals with deadline in 7 or 1 day, or today."""
+    try:
+        from datetime import timedelta
+        today = datetime.utcnow().date()
+        target_dates = [
+            (today + timedelta(days=7)).isoformat(),
+            (today + timedelta(days=1)).isoformat(),
+            today.isoformat(),
+        ]
+        g_res = sb.table("shared_goals").select("id,title,deadline").in_("deadline", target_dates).execute()
+        for g in (g_res.data or []):
+            try:
+                dl_str = g["deadline"]
+                dt = datetime.strptime(dl_str, "%Y-%m-%d").date()
+                days_left = (dt - today).days
+                if days_left == 7:
+                    notice = f"⏰ До дедлайна цели <b>{g['title']}</b> осталось <b>7 дней</b>. Налегаем! 💪"
+                elif days_left == 1:
+                    notice = f"🔥 Завтра дедлайн цели <b>{g['title']}</b>! Последний шанс! 🚀"
+                else:
+                    notice = f"🚨 Сегодня дедлайн цели <b>{g['title']}</b>! Отчитайтесь в конце дня 🎯"
+                members_res = sb.table("shared_members").select("user_id").eq("goal_id", g["id"]).eq("status", "active").execute()
+                for m in (members_res.data or []):
+                    try:
+                        await bot.send_message(m["user_id"], notice)
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"deadline reminder for goal {g.get('id')}: {e}")
+    except Exception as e:
+        logger.error(f"send_shared_deadline_reminders: {e}")
+
+
 # ====== MAIN ======
 
 async def main():
@@ -1115,7 +1248,9 @@ async def main():
     scheduler.add_job(send_evening_push,        "cron", minute=0)
     scheduler.add_job(send_challenge_reminder,  "cron", minute=0)
     scheduler.add_job(send_extra_push,          "cron", minute=0)
-    scheduler.add_job(send_custom_reminders,    "interval", minutes=1)
+    scheduler.add_job(send_custom_reminders,          "interval", minutes=1)
+    scheduler.add_job(send_shared_notifications,      "interval", minutes=1)
+    scheduler.add_job(send_shared_deadline_reminders, "cron", hour=9, minute=0)
     scheduler.start()
     logger.info("IAM Bot started ✅")
     await dp.start_polling(bot, skip_updates=True)
