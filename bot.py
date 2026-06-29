@@ -10,7 +10,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
-    WebAppInfo, CallbackQuery, LabeledPrice, PreCheckoutQuery
+    ReplyKeyboardMarkup, KeyboardButton,
+    WebAppInfo, CallbackQuery, LabeledPrice, PreCheckoutQuery, BotCommand
 )
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -35,7 +36,7 @@ STAR_PRODUCTS = {
     "goals100":  {"title": "+100 целей",  "desc": "Добавь 100 слотов для целей в IAM",   "stars": 250,  "goals": 100},
     "goals500":  {"title": "+500 целей",  "desc": "Добавь 500 слотов для целей в IAM",   "stars": 999,  "goals": 500},
     "goals1000": {"title": "+1000 целей", "desc": "Добавь 1000 слотов для целей в IAM",  "stars": 1999, "goals": 1000},
-    "lvlSEEKER":   {"title": "Уровень Искатель 🔍", "desc": "30 дней уровня SEEKER в IAM",    "stars": 199, "lvl": "SEEKER"},
+    "lvlSEEKER":   {"title": "Уровень Искатель 🔍", "desc": "30 дней уровня SEEKER в IAM",    "stars": 250, "lvl": "SEEKER"},
     "lvlCREATOR":  {"title": "Уровень Творец ⚡",   "desc": "30 дней уровня CREATOR в IAM",   "stars": 499, "lvl": "CREATOR"},
     "lvlVISIONARY":{"title": "Уровень Визионер 👁", "desc": "30 дней уровня VISIONARY в IAM", "stars": 999, "lvl": "VISIONARY"},
 }
@@ -70,6 +71,23 @@ def freq_kb(current="standard"):
         rows.append([InlineKeyboardButton(text=text, callback_data=f"freq_{key}")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def menu_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎯 Открыть IAM"), KeyboardButton(text="🛒 Магазин")],
+            [KeyboardButton(text="📖 Инструкции"), KeyboardButton(text="🔔 Напоминания")],
+        ],
+        resize_keyboard=True
+    )
+
+BUY_PARAM_TO_KEY = {
+    "25": "goals25", "100": "goals100",
+    "500": "goals500", "1000": "goals1000",
+    "lvlSEEKER": "lvlSEEKER",
+    "lvlCREATOR": "lvlCREATOR",
+    "lvlVISIONARY": "lvlVISIONARY",
+}
 
 # ====== REMINDER STATE MACHINE ======
 # SQL to create table in Supabase:
@@ -269,8 +287,10 @@ async def cmd_start(message: Message):
             pass
     # Telegram Stars purchase via deep link
     if len(args) > 1 and args[1].startswith("buy_"):
-        product_key = args[1][4:]  # strip "buy_"
+        param = args[1][4:]  # strip "buy_"
+        product_key = BUY_PARAM_TO_KEY.get(param, param)
         if product_key in STAR_PRODUCTS:
+            upsert_user(user.id, user.username, user.first_name)
             p = STAR_PRODUCTS[product_key]
             prices = [LabeledPrice(label=p["title"], amount=p["stars"])]
             await bot.send_invoice(
@@ -292,7 +312,7 @@ async def cmd_start(message: Message):
         "✍️ Веди дневник визуализации\n"
         "📊 Отслеживай прогресс каждый день\n\n"
         "<i>У успешных людей 5000+ целей.\nНачни прямо сейчас 👇</i>",
-        reply_markup=main_kb()
+        reply_markup=menu_kb()
     )
 
 @dp.message(Command("notify"))
@@ -599,16 +619,27 @@ async def cb_remind_flow(call: CallbackQuery):
             pass
         return
 
-@dp.message(F.text)
-async def handle_time_input(message: Message):
-    """Handles HH:MM time input during /remind flow."""
-    if message.text.startswith("/"):
+@dp.message(F.text, lambda m: not m.text.startswith("/"))
+async def handle_text_messages(message: Message):
+    """Handles menu buttons and HH:MM time input during /remind flow."""
+    text = message.text.strip()
+    if text == "🎯 Открыть IAM":
+        await message.answer("Открывай IAM 👇", reply_markup=open_app_kb("Открыть IAM ✨"))
+        return
+    if text == "🛒 Магазин":
+        await cmd_buy(message)
+        return
+    if text == "📖 Инструкции":
+        await cmd_help(message)
+        return
+    if text == "🔔 Напоминания":
+        await cmd_reminders(message)
         return
     uid = message.from_user.id
     state = remind_state.get(uid)
     if not state or state.get("step") != "time":
         return
-    time_str = message.text.strip()
+    time_str = text
     if not re.match(r"^\d{1,2}:\d{2}$", time_str):
         await message.answer("❌ Неверный формат. Напиши время как <b>ЧЧ:ММ</b>, например: <b>09:00</b>")
         return
@@ -1069,6 +1100,13 @@ async def send_challenge_reminder():
 # ====== MAIN ======
 
 async def main():
+    await bot.set_my_commands([
+        BotCommand(command="start",     description="Запустить IAM"),
+        BotCommand(command="buy",       description="Купить пакет целей ⭐"),
+        BotCommand(command="help",      description="Инструкции по IAM"),
+        BotCommand(command="reminders", description="Мои напоминания"),
+        BotCommand(command="remind",    description="Создать напоминание"),
+    ])
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(send_morning_push,        "cron", minute=0)
     scheduler.add_job(send_goal_reminders,      "cron", hour=10, minute=5)
