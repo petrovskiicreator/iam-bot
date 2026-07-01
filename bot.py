@@ -55,6 +55,12 @@ def open_app_kb(text="Открыть IAM ✨"):
         InlineKeyboardButton(text=text, web_app=WebAppInfo(url=WEBAPP_URL))
     ]])
 
+def open_shared_goal_kb(goal_id, text="Открыть совместную цель ✨"):
+    shared_url = f"{WEBAPP_URL}#shared_{goal_id}"
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=text, web_app=WebAppInfo(url=shared_url))
+    ]])
+
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть IAM", web_app=WebAppInfo(url=WEBAPP_URL))],
@@ -301,13 +307,13 @@ async def cmd_start(message: Message):
                 if existing["status"] == "active":
                     await message.answer(
                         f"👥 Ты уже участник цели <b>{g['title']}</b>!\n\nОткрой IAM, чтобы увидеть её.",
-                        reply_markup=open_app_kb("Открыть IAM ✨")
+                        reply_markup=open_shared_goal_kb(g["id"], "Открыть совместную цель ✨")
                     )
                 else:
                     sb.table("shared_members").update({"status": "active"}).eq("id", existing["id"]).execute()
                     await message.answer(
                         f"✅ Ты вернулся в цель <b>{g['title']}</b>!",
-                        reply_markup=open_app_kb("Открыть IAM ✨")
+                        reply_markup=open_shared_goal_kb(g["id"], "Открыть совместную цель ✨")
                     )
                 return
             uname = user.username or ""
@@ -316,8 +322,8 @@ async def cmd_start(message: Message):
             await message.answer(
                 f"🎉 <b>Добро пожаловать в совместную цель!</b>\n\n"
                 f"🎯 <b>{g['title']}</b>\n\n"
-                "Открой IAM, чтобы посмотреть задачи и участников 👇",
-                reply_markup=open_app_kb("Открыть IAM ✨")
+                "Нажми кнопку ниже, чтобы открыть задачи и участников 👇",
+                reply_markup=open_shared_goal_kb(g["id"], "Открыть совместную цель ✨")
             )
             try:
                 creator_id = g["created_by"]
