@@ -38,7 +38,10 @@ STAR_PRODUCTS = {
     "goals1000": {"title": "+1000 целей", "desc": "Добавь 1000 слотов для целей в IAM",  "stars": 1999, "goals": 1000},
     "lvlSEEKER":   {"title": "Уровень Искатель 🔍", "desc": "30 дней уровня SEEKER в IAM",    "stars": 250, "lvl": "SEEKER"},
     "lvlCREATOR":  {"title": "Уровень Творец ⚡",   "desc": "30 дней уровня CREATOR в IAM",   "stars": 499, "lvl": "CREATOR"},
-    "lvlVISIONARY":{"title": "Уровень Визионер 👁", "desc": "30 дней уровня VISIONARY в IAM", "stars": 999, "lvl": "VISIONARY"},
+    "lvlVISIONARY":  {"title": "Уровень Визионер 👁", "desc": "30 дней уровня VISIONARY в IAM", "stars": 999,  "lvl": "VISIONARY"},
+    "theme_kosmos":  {"title": "🌌 Тема Kosmos",      "desc": "Тёмная тема с фиолетовыми акцентами", "stars": 199, "theme": "kosmos"},
+    "theme_lux":     {"title": "💎 Тема Lux",         "desc": "Чёрная тема с золотыми акцентами",    "stars": 199, "theme": "lux"},
+    "theme_minimal": {"title": "🌿 Тема Minimal",     "desc": "Светлая тема с зелёными акцентами",   "stars": 199, "theme": "minimal"},
 }
 
 # ====== KEYBOARDS ======
@@ -340,6 +343,7 @@ async def cmd_start(message: Message):
     if len(args) > 1 and args[1].startswith("buy_"):
         param = args[1][4:]  # strip "buy_"
         product_key = BUY_PARAM_TO_KEY.get(param, param)
+        logger.info(f"Buy deeplink: uid={user.id} param={param} product_key={product_key}")
         if product_key in STAR_PRODUCTS:
             upsert_user(user.id, user.username, user.first_name)
             p = STAR_PRODUCTS[product_key]
@@ -501,12 +505,13 @@ async def pre_checkout(query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def payment_success(message: Message):
-    payload = message.successful_payment.invoice_payload  # "iam_goals25_123456"
+    payload = message.successful_payment.invoice_payload  # "iam_goals25_123456" or "iam_theme_kosmos_123456"
     parts = payload.split("_")
     uid = message.from_user.id
     try:
         if len(parts) >= 3 and parts[0] == "iam":
-            product_key = parts[1]  # e.g. "goals25" or "lvlCREATOR"
+            product_key = "_".join(parts[1:-1])  # e.g. "goals25", "lvlCREATOR", "theme_kosmos"
+            logger.info(f"Payment: uid={uid} product_key={product_key} payload={payload}")
             p = STAR_PRODUCTS.get(product_key, {})
             if "goals" in p:
                 # Add extra goals
@@ -533,9 +538,26 @@ async def payment_success(message: Message):
                     data["quickLvl"] = p["lvl"]
                     data["quickExp"] = exp
                     sb.table("user_data").upsert({"user_id": uid, "data": data, "updated_at": datetime.utcnow().isoformat()}, on_conflict="user_id").execute()
+                    logger.info(f"Level purchased: uid={uid} lvl={p['lvl']} exp={exp}")
                 await message.answer(
                     f"⭐ <b>Оплата прошла!</b>\n\n{p['title']} активен до <b>{exp}</b> 🏆\n\nОткрой IAM!",
                     reply_markup=open_app_kb("Открыть IAM 🚀")
+                )
+            elif "theme" in p:
+                # Unlock purchased theme
+                theme_name = p["theme"]
+                dr = sb.table("user_data").select("data").eq("user_id", uid).execute()
+                if dr.data:
+                    data = dr.data[0].get("data", {})
+                    owned = data.get("ownedThemes", [])
+                    if theme_name not in owned:
+                        owned.append(theme_name)
+                    data["ownedThemes"] = owned
+                    sb.table("user_data").upsert({"user_id": uid, "data": data, "updated_at": datetime.utcnow().isoformat()}, on_conflict="user_id").execute()
+                    logger.info(f"Theme purchased: uid={uid} theme={theme_name} ownedThemes={owned}")
+                await message.answer(
+                    f"🎨 <b>Тема {p['title']} разблокирована!</b>\n\nОткрой IAM — новая тема уже доступна.",
+                    reply_markup=open_app_kb("Открыть IAM 🎨")
                 )
     except Exception as e:
         logger.error(f"Payment processing error: {e}")
