@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+import random
+from datetime import datetime, timedelta, date
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -337,6 +338,50 @@ async def cmd_start(message: Message):
         except Exception as e:
             logger.error(f"join shared goal error: {e}")
             await message.answer("❌ Ошибка при входе в цель. Попробуй ещё раз.")
+        return
+
+    # Duel accept via deep link
+    if len(args) > 1 and args[1].startswith("duel_"):
+        upsert_user(user.id, user.username, user.first_name)
+        code = args[1][5:].upper()
+        try:
+            d_res = sb.table("duels").select("*").eq("invite_code", code).execute()
+            if not d_res.data:
+                await message.answer("❌ Дуэль не найдена. Проверь ссылку.")
+                return
+            d = d_res.data[0]
+            if d["challenger_id"] == user.id:
+                await message.answer("⚔️ Это твоя собственная дуэль — отправь ссылку другу, чтобы он принял вызов.")
+                return
+            if d["status"] != "pending":
+                await message.answer("⚔️ Эта дуэль уже началась или завершена.")
+                return
+            start_date = datetime.utcnow().date()
+            end_date = start_date + timedelta(days=7)
+            sb.table("duels").update({
+                "opponent_id": user.id,
+                "status": "active",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            }).eq("id", d["id"]).execute()
+            await message.answer(
+                f"⚔️ <b>Дуэль началась!</b>\n\n"
+                f"Соревнуйтесь в росте до <b>{end_date.isoformat()}</b>.\n"
+                "Побеждает тот, у кого выше % роста относительно себя за неделю.\n\n"
+                "Следи за дуэлью во вкладке 🏆 Рейтинг → 🗡 Мои дуэли.",
+                reply_markup=open_app_kb("Открыть Рейтинг 🏆")
+            )
+            try:
+                await bot.send_message(
+                    d["challenger_id"],
+                    "⚔️ <b>Твой вызов на дуэль принят!</b>\n\nСоревнование началось — загляни во вкладку 🏆 Рейтинг.",
+                    reply_markup=open_app_kb("Открыть Рейтинг 🏆")
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"duel accept error: {e}")
+            await message.answer("❌ Ошибка при принятии дуэли. Попробуй ещё раз.")
         return
 
     # Telegram Stars purchase via deep link
@@ -766,6 +811,14 @@ HELP_TEXT = (
     "В напоминаниях бота, мудрости дня и заданиях челленджа спрятаны фрагменты секретных фраз. "
     "Читай внимательно — собери все три фрагмента одной пасхалки, введи полную фразу в приложении "
     "и получи награду (дополнительные цели или заморозки).\n\n"
+    "<b>🏆 Рейтинг Роста</b>\n"
+    "Это не соревнование «кто больше сделал» — это соревнование с самим собой. "
+    "Мы сравниваем твой % роста за неделю относительно прошлой недели, а не абсолютное число действий. "
+    "Так у новичка и у опытного пользователя честные шансы. "
+    "Раз в неделю тебя случайно объединяют в группу ~20-25 человек — там ты видишь свою позицию и топ-5. "
+    "Ник — по желанию: по умолчанию ты «Игрок #1234», и только ты решаешь, показывать ли настоящий ник другим. "
+    "Можно вызвать друга на дуэль 1v1 — семь дней роста, у кого % выше, тот побеждает. "
+    "Никаких денег и ресурсов на кону — только гордость и место в Зале славы.\n\n"
     "<b>🔒 Конфиденциальность</b>\n"
     "IAM полностью анонимен. Мы не знаем твоё имя, не видим твои цели и записи. "
     "Все данные хранятся только на твоём устройстве и в зашифрованной базе данных. "
@@ -1255,6 +1308,243 @@ async def send_shared_deadline_reminders():
         logger.error(f"send_shared_deadline_reminders: {e}")
 
 
+# ====== GROWTH RATING ======
+
+LEVELS = ["DREAMER", "SEEKER", "CREATOR", "VISIONARY", "LEGEND"]
+LVL_REQ = {
+    "SEEKER":    {"ci": 30,  "en": 15,  "ms": 7, "ch": 0, "sh": 0,  "inv": 0, "eg": 0},
+    "CREATOR":   {"ci": 90,  "en": 50,  "ms": 7, "ch": 1, "sh": 0,  "inv": 0, "eg": 0},
+    "VISIONARY": {"ci": 90,  "en": 50,  "ms": 7, "ch": 1, "sh": 5,  "inv": 1, "eg": 3},
+    "LEGEND":    {"ci": 365, "en": 300, "ms": 7, "ch": 1, "sh": 20, "inv": 5, "eg": 10},
+}
+
+def week_start(dt: datetime) -> date:
+    """Monday of dt's UTC calendar week — matches weekStartISO() in index.html."""
+    d = dt.date()
+    return d - timedelta(days=d.weekday())
+
+def growth_pct(cur: int, prev: int) -> int:
+    """(this week - last week) / MAX(last week, 20) * 100 — matches the frontend formula."""
+    return round((cur - prev) / max(prev, 20) * 100)
+
+def _max_streak(checkins: list) -> int:
+    if not checkins or len(checkins) < 2:
+        return len(checkins) if checkins else 0
+    s = sorted(set(checkins))
+    mx = c = 1
+    for i in range(1, len(s)):
+        try:
+            d1 = datetime.strptime(s[i - 1], "%Y-%m-%d")
+            d2 = datetime.strptime(s[i], "%Y-%m-%d")
+        except Exception:
+            continue
+        if (d2 - d1).days == 1:
+            c += 1
+            mx = max(mx, c)
+        else:
+            c = 1
+    return mx
+
+def calc_level(data: dict) -> str:
+    """Mirrors calcLvl() in index.html. Does NOT apply the temporary quickLvl purchase
+    boost — Legend requalification must be based on real cumulative practice."""
+    lv = "DREAMER"
+    checkins = data.get("checkins") or []
+    entries = len(data.get("vis") or []) + len(data.get("grat") or [])
+    streak_max = _max_streak(checkins)
+    ch_day = data.get("chDay") or 0
+    shares = data.get("shares") or 0
+    act_inv = data.get("actInv") or 0
+    eggs = len(data.get("eggsFound") or [])
+    for level in LEVELS[1:]:
+        req = LVL_REQ.get(level)
+        if not req:
+            continue
+        ok = (
+            len(checkins) >= req["ci"] and
+            entries >= req["en"] and
+            streak_max >= req["ms"] and
+            (not req["ch"] or ch_day >= 21) and
+            shares >= req["sh"] and
+            act_inv >= req["inv"] and
+            eggs >= req["eg"]
+        )
+        if ok and LEVELS.index(level) > LEVELS.index(lv):
+            lv = level
+    return lv
+
+async def weekly_rating_rollover():
+    """Sunday 23:59 MSK: close out the week — compute growth%, form pods for
+    stragglers, archive top-3 of each pod to hall_of_fame, notify everyone."""
+    try:
+        ws = week_start(datetime.utcnow())
+        ws_prev = ws - timedelta(days=7)
+        ws_str, ws_prev_str = ws.isoformat(), ws_prev.isoformat()
+
+        cur_res = sb.table("weekly_scores").select("*").eq("week_start", ws_str).execute()
+        cur_rows = cur_res.data or []
+        qualifying = [r for r in cur_rows if (r.get("points") or 0) >= 15]
+        if not qualifying:
+            logger.info("Weekly rollover: no qualifying users")
+            return
+
+        prev_res = sb.table("weekly_scores").select("user_id,points").eq("week_start", ws_prev_str).execute()
+        prev_map = {r["user_id"]: r.get("points") or 0 for r in (prev_res.data or [])}
+
+        # Fallback pod assignment for anyone who reached 15+ pts without ever
+        # getting a client-side pod_id (e.g. crossed the threshold right at the wire).
+        pod_counts = {}
+        for r in qualifying:
+            if r.get("pod_id"):
+                pod_counts[r["pod_id"]] = pod_counts.get(r["pod_id"], 0) + 1
+        need_pod = [r for r in qualifying if not r.get("pod_id")]
+        if need_pod:
+            random.shuffle(need_pod)
+            next_pod_id = max(pod_counts.keys(), default=0) + 1
+            for row in need_pod:
+                target = next((pid for pid, c in pod_counts.items() if c < 25), None)
+                if target is None:
+                    target = next_pod_id
+                    next_pod_id += 1
+                    pod_counts[target] = 0
+                pod_counts[target] += 1
+                row["pod_id"] = target
+                try:
+                    sb.table("weekly_scores").update({"pod_id": target}).eq("user_id", row["user_id"]).eq("week_start", ws_str).execute()
+                except Exception as e:
+                    logger.warning(f"pod fallback assign failed uid={row.get('user_id')}: {e}")
+
+        # Compute growth_pct for everyone qualifying, write back, group by pod.
+        pods: dict = {}
+        for row in qualifying:
+            uid = row["user_id"]
+            pts = row.get("points") or 0
+            g = growth_pct(pts, prev_map.get(uid, 0))
+            row["growth_pct"] = g
+            try:
+                sb.table("weekly_scores").update({"growth_pct": g}).eq("user_id", uid).eq("week_start", ws_str).execute()
+            except Exception as e:
+                logger.warning(f"growth_pct write failed uid={uid}: {e}")
+            pods.setdefault(row.get("pod_id"), []).append(row)
+
+        # Top-3 of each pod -> hall_of_fame, then notify every qualifying user.
+        for pod_id, members in pods.items():
+            members.sort(key=lambda r: r["growth_pct"], reverse=True)
+            for rank, m in enumerate(members[:3], start=1):
+                try:
+                    sb.table("hall_of_fame").insert({
+                        "user_id": m["user_id"], "week_start": ws_str, "rank": rank,
+                        "growth_pct": m["growth_pct"], "pod_id": pod_id,
+                    }).execute()
+                except Exception as e:
+                    logger.warning(f"hall_of_fame insert failed uid={m['user_id']}: {e}")
+            for i, m in enumerate(members, start=1):
+                uid = m["user_id"]
+                g = m["growth_pct"]
+                sign = "+" if g >= 0 else ""
+                extra = ""
+                if i <= 3:
+                    medal = {1: "🥇", 2: "🥈", 3: "🥉"}[i]
+                    extra = f"\n{medal} Ты в топ-3 своего пода! Запись сохранена в Зале славы."
+                try:
+                    await bot.send_message(
+                        uid,
+                        f"📊 <b>Итоги недели роста</b>\n\n"
+                        f"Твоя позиция в поде: <b>#{i} из {len(members)}</b>\n"
+                        f"Рост: <b>{sign}{g}%</b>{extra}\n\n"
+                        "Новая неделя уже началась — заходи в IAM 🎯",
+                        reply_markup=open_app_kb("Открыть Рейтинг 🏆")
+                    )
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logger.warning(f"weekly rollover notify failed uid={uid}: {e}")
+        logger.info(f"Weekly rollover done: {len(qualifying)} qualifying users across {len(pods)} pods")
+    except Exception as e:
+        logger.error(f"weekly_rating_rollover error: {e}")
+
+async def weekly_rating_warning():
+    """~19:59 MSK, 4h before reset: warn users currently top-5 of their pod
+    (by live points snapshot) that they risk losing their spot."""
+    try:
+        ws_str = week_start(datetime.utcnow()).isoformat()
+        cur_res = sb.table("weekly_scores").select("user_id,points,pod_id").eq("week_start", ws_str).execute()
+        rows = [r for r in (cur_res.data or []) if r.get("pod_id") and (r.get("points") or 0) >= 15]
+        pods: dict = {}
+        for r in rows:
+            pods.setdefault(r["pod_id"], []).append(r)
+        count = 0
+        for pod_id, members in pods.items():
+            members.sort(key=lambda r: r.get("points") or 0, reverse=True)
+            for m in members[:5]:
+                try:
+                    await bot.send_message(
+                        m["user_id"],
+                        "🏆 <b>Ты в топе рейтинга роста!</b>\n\n"
+                        "Не сдавай позицию — осталось 4 часа до сброса недели ⏳",
+                        reply_markup=open_app_kb("Открыть Рейтинг 🏆")
+                    )
+                    count += 1
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logger.warning(f"weekly rating warning failed uid={m['user_id']}: {e}")
+        logger.info(f"Weekly rating warning sent to {count} users")
+    except Exception as e:
+        logger.error(f"weekly_rating_warning error: {e}")
+
+async def monthly_legend_requalify():
+    """1st of month, 00:00 MSK: re-evaluate the LEGEND streak for every user."""
+    try:
+        res = sb.table("bot_users").select(
+            "user_id,legend_streak_months,legend_streak_best,legend_freeze_available,legend_last_qualified_month"
+        ).execute()
+        users = res.data or []
+        this_month = datetime.utcnow().date().replace(day=1)
+        count_notified = 0
+        for u in users:
+            uid = u["user_id"]
+            try:
+                dr = sb.table("user_data").select("data").eq("user_id", uid).execute()
+                if not dr.data:
+                    continue
+                data = dr.data[0].get("data", {}) or {}
+                qualified = calc_level(data) == "LEGEND"
+                streak = u.get("legend_streak_months") or 0
+                best = u.get("legend_streak_best") or 0
+                freeze = u.get("legend_freeze_available") or 0
+                update = {}
+                if qualified:
+                    streak += 1
+                    best = max(best, streak)
+                    update["legend_streak_months"] = streak
+                    update["legend_streak_best"] = best
+                    update["legend_last_qualified_month"] = this_month.isoformat()
+                elif freeze > 0:
+                    update["legend_freeze_available"] = freeze - 1
+                else:
+                    update["legend_streak_months"] = 0
+                if update:
+                    sb.table("bot_users").update(update).eq("user_id", uid).execute()
+                if qualified and streak > 0:
+                    count_notified += 1
+                    try:
+                        await bot.send_message(
+                            uid,
+                            f"👑 <b>Legend streak продолжается!</b>\n\n"
+                            f"Ты держишь уровень LEGEND уже <b>{streak}</b> мес. подряд.\n"
+                            f"Рекорд: <b>{best}</b> мес.\n\n"
+                            "Продолжай в том же духе 🔥",
+                            reply_markup=open_app_kb("Открыть IAM 👑")
+                        )
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"legend requalify notify failed uid={uid}: {e}")
+            except Exception as e:
+                logger.warning(f"legend requalify failed uid={uid}: {e}")
+        logger.info(f"Legend requalify done: {count_notified} streaks extended/notified")
+    except Exception as e:
+        logger.error(f"monthly_legend_requalify error: {e}")
+
+
 # ====== MAIN ======
 
 async def main():
@@ -1276,6 +1566,9 @@ async def main():
     scheduler.add_job(send_custom_reminders,          "interval", minutes=1)
     scheduler.add_job(send_shared_notifications,      "interval", minutes=1)
     scheduler.add_job(send_shared_deadline_reminders, "cron", hour=9, minute=0)
+    scheduler.add_job(weekly_rating_warning,  "cron", day_of_week="sun", hour=19, minute=59, timezone="Europe/Moscow")
+    scheduler.add_job(weekly_rating_rollover, "cron", day_of_week="sun", hour=23, minute=59, timezone="Europe/Moscow")
+    scheduler.add_job(monthly_legend_requalify, "cron", day=1, hour=0, minute=0, timezone="Europe/Moscow")
     scheduler.start()
     logger.info("IAM Bot started ✅")
     await dp.start_polling(bot, skip_updates=True)
